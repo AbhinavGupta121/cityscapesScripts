@@ -118,12 +118,17 @@ class Box3dEvaluator:
         # internal dict keeping additional statistics
         self._stats = OrderedDict()
 
-        # the actual confidence thresholds
+        # The actual confidence thresholds
+        # These thresholds are used to calculate the array of pairs of TPs,FPs, and FNs. box confidence scores >= this threshold are only permitted
+        # For each label a best threshold is selected as the one which maximises product of recall and precision for the label.
+        
         self._conf_thresholds = np.arange(
             0.0, 1.01, 1.0 / self.eval_params.num_conf
         )
 
         # the actual depth bins
+        # the TP pairs are segregated based on the GT's depth value. The pairs are then averaged over all depth bins to lead to the final estimate.
+        
         self._depth_bins = range(0, self.eval_params.max_depth + 1, self.eval_params.step_size)
 
     def reset(self):
@@ -215,6 +220,8 @@ class Box3dEvaluator:
             for d in data["objects"]:
                 if d["label"] in self.eval_params.labels_to_evaluate:
                     self._stats["GT_stats"][d["label"]] += 1
+                    
+                    #initialize each instance in GT as a 3d bbox object and append to the list
                     box_data = CsBbox3d()
                     box_data.fromJsonText(d)
                     gts_for_image.append(box_data)
@@ -275,6 +282,7 @@ class Box3dEvaluator:
                     d["label"] in self.eval_params.labels_to_evaluate
                 ):
                     try:
+                        #initialize each instance in predictions as a 3d bbox object and append to the list
                         box_data = CsBbox3d()
                         box_data.fromJsonText(d)
                     except Exception:
@@ -300,11 +308,14 @@ class Box3dEvaluator:
 
         # initialize empty data
         for s in self._conf_thresholds:
+            
+            #initialize keys of the stats dict as predefined confidence thresholds
             self._stats[s] = {}
             self._stats[s]["data"] = {}
 
         logger.info("Evaluating images...")
         # calculate stats for each image
+        # store the idxs of TPs,FPs and FNs in the stats[s]["data"][base] dict
         self._calcImageStats()
 
         logger.info("Calculate AP...")
@@ -347,6 +358,7 @@ class Box3dEvaluator:
         # single threaded
         results = []
         for x in tqdm(self.gts.keys()):
+            #x is just the image id of base img
             results.append(self._worker(x))
 
         # update internal result dict with the corresponding results
@@ -372,6 +384,8 @@ class Box3dEvaluator:
         box3dTransform = Box3dImageTransform(camera)
 
         for p in pred_boxes["objects"]:
+            #initialize the box 3d transform
+            #change the existing value of 2d amodal box as smallest rectangle circumscribing all 8 vertices of cropped and projected 3d bbox on the image plane.
             box3dTransform.initialize_box_from_annotation(p)
             p.bbox_2d.setAmodalBox(box3dTransform.get_amodal_box_2d())
 
@@ -380,6 +394,9 @@ class Box3dEvaluator:
             tmp_stats[s] = {
                 "data": {}
             }
+            #tp,fp,fn idx for the GTs and preds
+            #tp_idx_gt is a list comprising of idx of all GTs bboxes which are identified as TP pairs. 
+            #tp_idx_pred is a list comprising of idx of all preds boxes which are identified as TP pairs. 
             (tp_idx_gt, tp_idx_pred, fp_idx_pred,
              fn_idx_gt) = self._addImageEvaluation(gt_boxes, pred_boxes, s)
 
@@ -423,6 +440,7 @@ class Box3dEvaluator:
         # calculate stats per class
         for i in self.eval_params.labels_to_evaluate:
             # get idx for pred boxes for current class
+            #Note: This list is subset of original pred_boxes["objects"] since only current label and high box score is selected.
             pred_idx = [idx for idx, box in enumerate(
                 pred_boxes["objects"]) if box.label == i and box.score >= min_score]
 
@@ -470,12 +488,15 @@ class Box3dEvaluator:
                     [gt_boxes["ignores"][x].bbox for x in gt_idx_ignores])
 
             # calculate IoU matrix between GTs and Preds
+   
             iou_matrix = calcIouMatrix(boxes_2d_gt, boxes_2d_pred)
 
             # get matches
+            # Those idx in Gts and pred pairs which have the highest iou and >min_iou are returned
             (gt_tp_row_idx, pred_tp_col_idx, _) = self._getMatches(iou_matrix)
 
             # convert it to box idx
+            #make a list of all idx
             gt_tp_idx = [gt_idx[x] for x in gt_tp_row_idx]
             pred_tp_idx = [pred_idx[x] for x in pred_tp_col_idx]
             gt_fn_idx = [x for x in gt_idx if x not in gt_tp_idx]
@@ -483,6 +504,9 @@ class Box3dEvaluator:
                 x for x in pred_idx if x not in pred_tp_idx]
 
             # check if remaining FP idx match with ignored GT
+            # ignored Gt could be crowded or highly occluded instances which would otherwise affect the score negatively by counting as false positives.
+            # Note:It doesn't check for predictions overlapping with ego vehicle so remove them yourself before doing evaluation otherwise you'll get very bad results.
+            
             boxes_2d_pred_fp = np.zeros((0, 4))
             if len(pred_fp_idx_check_for_ignores) > 0:
                 # as there are no amodal boxes for ignore regions
@@ -516,6 +540,7 @@ class Box3dEvaluator:
     ):
         # type: (...) -> Tuple[List[int], List[int], List[int]]
         """Internal method that gets the TP matches between the predictions and the GT data.
+        Checks if the iou>min_iou to match
 
         Args:
             iou_matrix (np.ndarray): The NxM matrix containing the pairwise overlap or IoU
@@ -596,6 +621,7 @@ class Box3dEvaluator:
             gt_dist = int(gt_dist / self.eval_params.step_size) * \
                 self.eval_params.step_size
 
+            # Calculate BEV distance metric for all depth bins and for each label corresponding to the best confidence score.
             self._stats["working_data"][label]["Center_Dist"][gt_dist].append(
                 1. - min(center_dist / float(self.eval_params.max_depth), 1.))  # norm it to 1.
 
@@ -611,6 +637,8 @@ class Box3dEvaluator:
         # type: (...) -> None
         """Internal method that calculates the size similarity for a TP box
         s = min(w/w', w'/w) * min(h/h', h'/h) * min(l/l', l'/l)
+        
+        # Calculate BEV distance metric for all depth bins.
 
         Args:
             label (str): the class that will be evaluated
@@ -631,7 +659,8 @@ class Box3dEvaluator:
 
             gt_dist = int(gt_dist / self.eval_params.step_size) * \
                 self.eval_params.step_size
-
+            
+            # Calculate size similarity metric for all depth bins and for each label corresponding to the best confidence score.
             self._stats["working_data"][label]["Size_Similarity"][gt_dist].append(
                 size_simi)
 
@@ -670,7 +699,7 @@ class Box3dEvaluator:
 
             gt_dist = int(gt_dist / self.eval_params.step_size) * \
                 self.eval_params.step_size
-
+            # Calculate orientation similarity metric for all depth bins and for each label corresponding to the best confidence score.
             self._stats["working_data"][label]["OS_Yaw"][gt_dist].append(
                 os_yaw)
             self._stats["working_data"][label]["OS_Pitch_Roll"][gt_dist].append(
@@ -705,7 +734,8 @@ class Box3dEvaluator:
                 if len(values) > 0:
                     num_items += len(values)
                     all_items += values
-
+                    
+                    #stores averaged value for each metric and label and at a specific depth 
                     curr_mean = sum(values) / float(len(values))
 
                     depths.append(depth)
@@ -714,6 +744,7 @@ class Box3dEvaluator:
 
             # AUC is calculated as the mean of all values for available depths
             if len(vals) > 1:
+                #average the value of each metric corresponding to one label over all depths
                 result_auc = np.mean(vals)
             else:
                 result_auc = 0.
@@ -721,7 +752,7 @@ class Box3dEvaluator:
             # remove the expanded entries
             for d, v, n in list(zip(depths, vals, num_items_list)):
                 result_dict[d] = v
-                result_items[d] = n
+                result_items[d] = n # no of Tp pairs detections for that depth
 
             self.results[parameter_name][label]["data"] = result_dict
             self.results[parameter_name][label]["auc"] = result_auc
@@ -753,6 +784,8 @@ class Box3dEvaluator:
 
         # calculate the statistics for each class
         for label in self.eval_params.labels_to_evaluate:
+            
+            #select the best score that maximise the product of precision and recall for each label
             working_confidence = self._stats["working_confidence"][label]
             working_data = self._stats[working_confidence]["data"]
 
@@ -827,6 +860,7 @@ class Box3dEvaluator:
         # calculate detection store for each class
         for label in self.eval_params.labels_to_evaluate:
             vals = {p: self.results[p][label]["auc"] for p in parameters}
+            #detection score for each class
             det_score = vals["AP"] * (vals["Center_Dist"] + vals["Size_Similarity"] +
                                       vals["OS_Yaw"] + vals["OS_Pitch_Roll"]) / 4.
             self.results["Detection_Score"][label] = det_score
@@ -889,7 +923,8 @@ class Box3dEvaluator:
                             continue
 
                         tp_depth = int(tp_depth / self.eval_params.step_size) * self.eval_params.step_size
-
+                        
+                        #append idx of TPs corresponding to each label and each depth bin
                         tp_per_depth[label][tp_depth].append(idx)
 
                 for label, idxs in img_base_stats["fp_idx_pred"].items():
@@ -901,7 +936,8 @@ class Box3dEvaluator:
                             continue
 
                         fp_depth = int(fp_depth / self.eval_params.step_size) * self.eval_params.step_size
-
+                        
+                        #append idx of FPs corresponding to each label and each depth bin
                         fp_per_depth[label][fp_depth].append(idx)
 
                 for label, idxs in img_base_stats["fn_idx_gt"].items():
@@ -913,7 +949,8 @@ class Box3dEvaluator:
                             continue
 
                         fn_depth = int(fn_depth / self.eval_params.step_size) * self.eval_params.step_size
-
+                        
+                        #append idx of FNs corresponding to each label and each depth bin
                         fn_per_depth[label][fn_depth].append(idx)
 
             # calculate per depth precision and recall per class
@@ -946,7 +983,7 @@ class Box3dEvaluator:
                         float(tp[label] + fp[label])
                     recall[label] = tp[label] / \
                         float(tp[label] + fn[label])
-
+                # auc for each class--area under the curve. Used in best confidence score calculation for each label
                 auc[label] = precision[label] * recall[label]
 
             # write to stats
@@ -981,7 +1018,7 @@ class Box3dEvaluator:
 
         # calculate standard AP per class
         for label in self.eval_params.labels_to_evaluate:
-            # best_auc and best_score are used for determining working point
+            # best_auc and best_score for each label are used for determining working point
             best_auc = 0.
             best_score = 0.
 
@@ -1009,7 +1046,7 @@ class Box3dEvaluator:
             for i in range(len(precisions) - 2, -1, -1):
                 precisions[i] = np.maximum(precisions[i], precisions[i + 1])
 
-            # gather indices of distinct recall values
+            # gather indices of distinct recall values. Can't use formula on same values
             recall_idx = np.where(recalls[1:] != recalls[:-1])[0] + 1
 
             # calculate ap
@@ -1027,6 +1064,7 @@ class Box3dEvaluator:
                 working_confidence[label] = self.eval_params.cw
 
         # calculate depth dependent mAP
+        # allows for optional calculation of ap_per_depth
         for label in self.eval_params.labels_to_evaluate:
             for d in self._depth_bins:
                 tmp_dict = OrderedDict()
@@ -1078,8 +1116,9 @@ class Box3dEvaluator:
                     tmp_dict["data"]["recall"] = [float(x) for x in recalls_]
                     tmp_dict["data"]["precision"] = [
                         float(x) for x in precisions_]
-
+                       #ap_per_depth per label--optional calculation. not explicitly required in evaluation
                     ap_per_depth[label][d] = tmp_dict
+                    
                 else:  # no valid detection until this depth
                     tmp_dict["auc"] = -1.
                     tmp_dict["data"]["recall"] = []
