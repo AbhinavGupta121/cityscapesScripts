@@ -94,15 +94,21 @@ class Box3dImageTransform(object):
         self._center = np.zeros((3,))
 
         self.loc = ["BLB", "BRB", "FRB", "FLB", "BLT", "BRT", "FRT", "FLT"]
-
+        
+        #2d points (u,v) for each of the 8 vertices of bbox
         self._box_points_2d = np.zeros((8, 2))
+        
+        #3d points for each of the 8 vertices of bbox in vehicle coordinate frame.
         self._box_points_3d_vehicle = np.zeros((8, 3))
+        
+        #3d points for each of the 8 vertices of bbox in camera coordinate frame i.e after multiplying with extrinsic matrix and K_multiplier
         self._box_points_3d_cam = np.zeros((8, 3))
 
         self.bottom_arrow_2d = np.zeros((2, 2))
         self._bottom_arrow_3d_vehicle = np.zeros((2, 3))
         self._bottom_arrow_3d_cam = np.zeros((2, 3))
 
+        #contains 2d points (u,v) for each of the 6 cropped faces of the 3d bbox cuboid.
         self._box_left_side_cropped_2d = []
         self._box_right_side_cropped_2d = []
         self._box_front_side_cropped_2d = []
@@ -153,7 +159,7 @@ class Box3dImageTransform(object):
         self._size = np.array(size)
         self._rotation_matrix = np.array(quaternion_rot.rotation_matrix)
         self._center = center
-
+        #update all other params of the object such as box points 2d and 3d, cropped points of each face in 2d etc.
         self.update()
 
     def get_vertices(self, coordinate_system=CRS_V):
@@ -276,6 +282,9 @@ class Box3dImageTransform(object):
         ]
 
     def _crop_side_polygon_and_project(self, side_point_indices=[], side_points=[]):
+     
+     # Calculates cropped polygon faces of 3d bbox cuboid. 
+     # If they lie outside the image dimensions, crops the face and bring them within image boundaries and stores (u,v) points for each corner of the cropped face
         K_matrix = get_projection_matrix(self._camera)
         camera_plane_z = 0.01
 
@@ -313,8 +322,14 @@ class Box3dImageTransform(object):
         return cropped_polygon_2d
 
     def update(self):
+        #update box points in camera coordinate frame
         self._update_box_points_3d()
+       
+        # Updates 2d points of each of the cropped face of the 3d bbox cuboid when projected onto the 2d image. 
+        # Ensure that the points on the cropped faces lie within th boundaries of image.
         self._update_box_sides_cropped()
+        
+        #Naively calculates u,v values of projected 3d bbox corner points. u,v values may or may not fit on the image dimensions
         self._update_box_points_2d()
 
     def _update_box_sides_cropped(self):
@@ -400,6 +415,7 @@ class Box3dImageTransform(object):
             self._box_points_3d_vehicle, self._camera.sensor_T_ISO_8855
         )
         K_multiplier = get_K_multiplier()
+        # 3d bbox points in camera coordinate frame
         self._box_points_3d_cam = np.matmul(K_multiplier, box_points_3d_cam.T).T
         self._bottom_arrow_3d_cam = np.matmul(K_multiplier, bottom_arrow_3d_cam.T).T
 
